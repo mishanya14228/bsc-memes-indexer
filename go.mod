@@ -2,7 +2,11 @@ module bsc-memes-indexer
 
 go 1.25.1
 
-require github.com/ethereum/go-ethereum v1.16.4
+require (
+	github.com/ethereum/go-ethereum v1.16.4
+	github.com/joho/godotenv v1.5.1
+	github.com/rabbitmq/amqp091-go v1.10.0
+)
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
@@ -18,7 +22,6 @@ require (
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/holiman/uint256 v1.3.2 // indirect
-	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/shirou/gopsutil v3.21.4-0.20210419000835-c7a38de76ee5+incompatible // indirect
 	github.com/supranational/blst v0.3.16-0.20250831170142-f48500c1fdbe // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
