@@ -151,20 +151,13 @@ func (p *Producer) Close() {
 }
 
 func (p *Producer) processLog(ctx context.Context, vLog types.Log) (*trade.Swap, error) {
-	header, err := p.ethClient.HeaderByNumber(ctx, big.NewInt(int64(vLog.BlockNumber)))
-	if err != nil {
-		return nil, fmt.Errorf("failed to get block header: %w", err)
-	}
-
 	// The non-indexed arguments are packed into the Data field.
-	// We need to unpack them according to the ABI
 	unpackedData, err := pancakeABI.Events["Swap"].Inputs.NonIndexed().Unpack(vLog.Data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unpack log data: %w", err)
 	}
 
 	// The indexed fields are stored in the Topics.
-	// Topic[0] is the event signature hash, subsequent topics are the indexed fields.
 	if len(vLog.Topics) < 3 {
 		return nil, fmt.Errorf("invalid swap event: expected at least 3 topics, got %d", len(vLog.Topics))
 	}
@@ -173,7 +166,6 @@ func (p *Producer) processLog(ctx context.Context, vLog types.Log) (*trade.Swap,
 	toAddress := common.BytesToAddress(vLog.Topics[2].Bytes())
 
 	// Map the unpacked non-indexed data to the correct fields.
-	// The order is defined by the ABI: amount0In, amount1In, amount0Out, amount1Out
 	amount0In := unpackedData[0].(*big.Int)
 	amount1In := unpackedData[1].(*big.Int)
 	amount0Out := unpackedData[2].(*big.Int)
@@ -182,7 +174,7 @@ func (p *Producer) processLog(ctx context.Context, vLog types.Log) (*trade.Swap,
 	return &trade.Swap{
 		PoolAddress: vLog.Address,
 		Block:       vLog.BlockNumber,
-		Timestamp:   header.Time,
+		Timestamp:   uint64(time.Now().Unix()), // Use processing time instead of block time
 		TxHash:      vLog.TxHash,
 		Sender:      senderAddress,
 		To:          toAddress,

@@ -161,11 +161,6 @@ func (p *Producer) Close() {
 }
 
 func (p *Producer) processLog(ctx context.Context, vLog types.Log) (*trade.Trade, error) {
-	header, err := p.ethClient.HeaderByNumber(ctx, big.NewInt(int64(vLog.BlockNumber)))
-	if err != nil {
-		return nil, fmt.Errorf("failed to get block header: %w", err)
-	}
-
 	direction := "sell"
 	if vLog.Topics[0] == topics.FourMemeBuyTopic {
 		direction = "buy"
@@ -179,7 +174,7 @@ func (p *Producer) processLog(ctx context.Context, vLog types.Log) (*trade.Trade
 	return &trade.Trade{
 		Platform:     "four.meme",
 		Block:        vLog.BlockNumber,
-		Timestamp:    header.Time,
+		Timestamp:    uint64(time.Now().Unix()),
 		TxHash:       vLog.TxHash,
 		Direction:    direction,
 		Token:        unpackedData[0].(common.Address),
