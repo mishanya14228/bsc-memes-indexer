@@ -146,8 +146,9 @@ func (p *Producer) Publish(ctx context.Context, trade *trade.Trade) error {
 		false,             // mandatory
 		false,             // immediate
 		amqp.Publishing{
-			ContentType: "application/json",
-			Body:        body,
+			ContentType:  "application/json",
+			DeliveryMode: amqp.Persistent,
+			Body:         body,
 		},
 	)
 }

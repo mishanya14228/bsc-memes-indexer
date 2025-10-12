@@ -1,5 +1,6 @@
 package queue
 
 const (
-	TradesQueue = "trades"
+	TradesQueue    = "trades"
+	PoolSwapsQueue = "pool-swaps"
 )

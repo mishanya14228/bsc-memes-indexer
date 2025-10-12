@@ -9,13 +9,24 @@ services:
     environment:
       RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER}
       RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS}
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 5
+
   redis:
     image: 'redis:latest'
-#    ports:
-#      - '6379:6379'
     command: redis-server --appendonly yes
     volumes:
       - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   four-meme-producer:
     build:
@@ -25,8 +36,24 @@ services:
       - .env
     restart: unless-stopped
     depends_on:
-      - rabbitmq
-      - redis
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  pancake-producer:
+    build:
+      context: .
+      dockerfile: pancake-producer/Dockerfile
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   redis-data:
+  rabbitmq-data:
