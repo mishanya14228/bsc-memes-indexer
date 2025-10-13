@@ -161,7 +161,7 @@ func (r *Relay) loadPoolTokens(ctx context.Context, poolAddress common.Address) 
 	pipe := r.redisClient.Pipeline()
 	pipe.HSet(ctx, cacheKey, "token0", token0.Hex())
 	pipe.HSet(ctx, cacheKey, "token1", token1.Hex())
-	pipe.Expire(ctx, cacheKey, 24*time.Hour)
+	pipe.Expire(ctx, cacheKey, 10*24*time.Hour)
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		log.Printf("[warn] failed to cache pool tokens for %s: %v", poolAddress.Hex(), err)
