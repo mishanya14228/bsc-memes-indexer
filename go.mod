@@ -1,4 +1,4 @@
-module bsc-memes-indexer
+module github.com/mikhailzakipniy/bsc-memes-indexer
 
 go 1.25.1
 

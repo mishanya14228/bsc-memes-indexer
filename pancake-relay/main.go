@@ -13,15 +13,15 @@ import (
 	"syscall"
 	"time"
 
-	pancakeabi "bsc-memes-indexer/shared/abi"
-	"bsc-memes-indexer/shared/queue"
-	"bsc-memes-indexer/shared/tokens"
-	"bsc-memes-indexer/shared/trade"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
+	pancakeabi "github.com/mikhailzakipniy/bsc-memes-indexer/shared/abi"
+	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/queue"
+	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/tokens"
+	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/trade"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
