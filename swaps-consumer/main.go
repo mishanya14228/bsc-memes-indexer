@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math/big"
 	"os"
 	"os/signal"
 	"strings"
@@ -200,14 +201,18 @@ func (c *Consumer) bulkInsert(messages []amqp.Delivery) error {
 			continue
 		}
 
+		scale := big.NewInt(1_000_000_000)
+		tokensAmount := new(big.Int).Div(t.TokensAmount, scale).String()
+		bnbAmount := new(big.Int).Div(t.BnbAmount, scale).String()
+
 		valueStrings = append(valueStrings, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)", i*9+1, i*9+2, i*9+3, i*9+4, i*9+5, i*9+6, i*9+7, i*9+8, i*9+9))
 		valueArgs = append(valueArgs, time.Unix(int64(t.Timestamp), 0))
 		valueArgs = append(valueArgs, t.Block)
 		valueArgs = append(valueArgs, t.Trader.Hex())
 		valueArgs = append(valueArgs, t.Direction)
 		valueArgs = append(valueArgs, t.Token.Hex())
-		valueArgs = append(valueArgs, t.TokensAmount.Int64()/1_000_000_000)
-		valueArgs = append(valueArgs, t.BnbAmount.Int64()/1_000_000_000)
+		valueArgs = append(valueArgs, tokensAmount)
+		valueArgs = append(valueArgs, bnbAmount)
 		valueArgs = append(valueArgs, t.TxHash.Hex())
 		valueArgs = append(valueArgs, t.Platform)
 	}
