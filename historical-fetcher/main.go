@@ -2,14 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/queue"
 	"log"
 	"math/big"
 	"os"
-	"os/signal"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -21,6 +21,7 @@ import (
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/contracts"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/pancake"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/topics"
+	amqp "github.com/rabbitmq/amqp091-go"
 	bson "go.mongodb.org/mongo-driver/bson"
 	goMongo "go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -46,35 +47,100 @@ type blockRange struct {
 	end   uint64
 }
 
+type SkippedBlockRange struct {
+	Start uint64 `json:"start"`
+	End   uint64 `json:"end"`
+}
+
+func runListener() error {
+	rabbitmqURL := os.Getenv("RABBITMQ_URL")
+	if rabbitmqURL == "" {
+		return fmt.Errorf("RABBITMQ_URL must be set")
+	}
+
+	conn, err := amqp.Dial(rabbitmqURL)
+	if err != nil {
+		return fmt.Errorf("failed to connect to RabbitMQ: %w", err)
+	}
+	defer conn.Close()
+
+	ch, err := conn.Channel()
+	if err != nil {
+		return fmt.Errorf("failed to open a channel: %w", err)
+	}
+	defer ch.Close()
+
+	queues := []string{queue.FourMemeSkippedBlocksQueue, queue.PancakeSkippedBlocksQueue}
+	for _, q := range queues {
+		_, err = ch.QueueDeclare(q, true, false, false, false, nil)
+		if err != nil {
+			return fmt.Errorf("failed to declare queue %s: %w", q, err)
+		}
+	}
+
+	forever := make(chan bool)
+
+	for _, q := range queues {
+		msgs, err := ch.Consume(
+			q,    // queue
+			"",   // consumer
+			true, // auto-ack
+			false,
+			false,
+			false,
+			nil,
+		)
+		if err != nil {
+			return fmt.Errorf("failed to register a consumer for queue %s: %w", q, err)
+		}
+
+		go func(queueName string) {
+			for d := range msgs {
+				log.Printf("Received a message from %s", queueName)
+				var skippedRange SkippedBlockRange
+				if err := json.Unmarshal(d.Body, &skippedRange); err != nil {
+					log.Printf("[error] failed to unmarshal skipped block range: %v", err)
+					continue
+				}
+
+				log.Printf("[info] processing skipped block range %d-%d", skippedRange.Start, skippedRange.End)
+				if err := run(context.Background(), skippedRange.Start, skippedRange.End); err != nil {
+					log.Printf("[error] failed to process skipped block range: %v", err)
+				}
+			}
+		}(q)
+	}
+
+	log.Printf(" [*] Waiting for messages. To exit press CTRL+C")
+	<-forever
+
+	return nil
+}
 func main() {
 	fromBlock := flag.Uint64("from", 0, "starting block (inclusive)")
 	toBlock := flag.Uint64("to", 0, "ending block (inclusive)")
 	flag.Parse()
 
-	if *fromBlock > *toBlock {
-		log.Fatalf("[fatal] from block (%d) must be less than or equal to to block (%d)", *fromBlock, *toBlock)
-	}
-	if *toBlock == 0 {
-		log.Fatalf("[fatal] to block must be provided and greater than zero")
-	}
-
-	if err := godotenv.Load(); err != nil {
-		log.Println("[info] .env file not found, relying on environment variables")
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		sig := <-sigChan
-		log.Printf("[info] received %s, shutting down...", sig)
-		cancel()
-	}()
-
-	if err := run(ctx, *fromBlock, *toBlock); err != nil {
-		log.Fatalf("[fatal] historical fetch failed: %v", err)
+	if *fromBlock > 0 && *toBlock > 0 {
+		// Manual mode
+		if *fromBlock > *toBlock {
+			log.Fatalf("[fatal] from block (%d) must be less than or equal to to block (%d)", *fromBlock, *toBlock)
+		}
+		if err := godotenv.Load(); err != nil {
+			log.Println("[info] .env file not found, relying on environment variables")
+		}
+		if err := run(context.Background(), *fromBlock, *toBlock); err != nil {
+			log.Fatalf("[fatal] historical fetch failed: %v", err)
+		}
+	} else {
+		// Listener mode
+		log.Println("[info] running in listener mode")
+		if err := godotenv.Load(); err != nil {
+			log.Println("[info] .env file not found, relying on environment variables")
+		}
+		if err := runListener(); err != nil {
+			log.Fatalf("[fatal] listener failed: %v", err)
+		}
 	}
 }
 

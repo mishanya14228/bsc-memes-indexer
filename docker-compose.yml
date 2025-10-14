@@ -86,6 +86,19 @@ services:
       redis:
         condition: service_healthy
 
+  historical-fetcher:
+    build:
+      context: .
+      dockerfile: historical-fetcher/Dockerfile
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   archive-repeater:
     build:
       context: .
@@ -97,6 +110,19 @@ services:
         condition: service_healthy
       mongodb:
         condition: service_started
+
+  swaps-consumer:
+    build:
+      context: .
+      dockerfile: swaps-consumer/Dockerfile
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
 volumes:
   redis-data:
