@@ -6,6 +6,7 @@ require (
 	github.com/ethereum/go-ethereum v1.16.4
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/joho/godotenv v1.5.1
+	github.com/lib/pq v1.10.9
 	github.com/rabbitmq/amqp091-go v1.10.0
 	go.mongodb.org/mongo-driver v1.16.0
 	golang.org/x/sync v0.12.0

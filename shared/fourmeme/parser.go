@@ -58,7 +58,7 @@ func ParseTradeFromLog(vLog types.Log, timestamp uint64) (*trade.Trade, error) {
 	}
 
 	return &trade.Trade{
-		Platform:     "four.meme",
+		Platform:     "FourMeme",
 		Block:        vLog.BlockNumber,
 		Timestamp:    timestamp,
 		TxHash:       vLog.TxHash,
