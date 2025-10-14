@@ -209,7 +209,7 @@ func (c *Consumer) bulkInsert(messages []amqp.Delivery) error {
 		valueArgs = append(valueArgs, time.Unix(int64(t.Timestamp), 0))
 		valueArgs = append(valueArgs, t.Block)
 		valueArgs = append(valueArgs, t.Trader.Hex())
-		valueArgs = append(valueArgs, t.Direction)
+		valueArgs = append(valueArgs, strings.ToLower(t.Direction))
 		valueArgs = append(valueArgs, t.Token.Hex())
 		valueArgs = append(valueArgs, tokensAmount)
 		valueArgs = append(valueArgs, bnbAmount)
@@ -231,7 +231,7 @@ func (c *Consumer) insertSingle(t *trade.Trade) error {
 		time.Unix(int64(t.Timestamp), 0),
 		t.Block,
 		t.Trader.Hex(),
-		t.Direction,
+		strings.ToLower(t.Direction),
 		t.Token.Hex(),
 		t.TokensAmount.Int64(),
 		t.BnbAmount.Int64(),
