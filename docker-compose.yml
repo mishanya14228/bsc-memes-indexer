@@ -98,19 +98,6 @@ services:
       mongodb:
         condition: service_started
 
-  four-meme-backtracker:
-    build:
-      context: .
-      dockerfile: four-meme-backtracker/Dockerfile
-    env_file:
-      - .env
-    restart: unless-stopped
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
 volumes:
   redis-data:
   rabbitmq-data:

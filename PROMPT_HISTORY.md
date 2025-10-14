@@ -53,3 +53,17 @@ This document summarizes the development process and key decisions made during t
 ## 6. Documentation
 
 - The process concluded with the creation of `PROJECT_SUMMARY.md` and this history file.
+
+## 7. Implementing the `swaps-consumer` and `archive-repeater`
+
+- **`swaps-consumer`:**
+    - A new service was created to consume trades from the `trades` queue and insert them into a PostgreSQL database.
+    - The implementation includes buffering, bulk inserts, and a fallback to individual inserts for error handling.
+    - Failed messages are saved to a MongoDB collection.
+    - The implementation was iterated upon to handle database constraints and to improve performance by using a single `INSERT` statement with multiple `VALUES` clauses.
+- **`archive-repeater`:**
+    - A new service was created to read historical logs from MongoDB, parse them, and republish them to the appropriate RabbitMQ queues.
+    - The implementation includes batch processing, asynchronous deletion of processed logs, and concurrent processing to improve throughput.
+    - The service was containerized and added to `docker-compose.yml`.
+- **Docker and Localhost:**
+    - Discussed how to access services running on the host's `localhost` from within a Docker container using `host.docker.internal`.

@@ -42,6 +42,24 @@ The final result is a single, clean stream of `Trade` messages in the `trades` q
     4.  Sets the `platform` field to `"Pancake"`.
 -   **Output:** Publishes the final `trade.Trade` message to the `trades` queue.
 
+### `swaps-consumer`
+-   **Input:** Consumes `trade.Trade` messages from the `trades` queue.
+-   **Logic:**
+    1.  Buffers messages in memory.
+    2.  Performs bulk inserts into a PostgreSQL database.
+    3.  Handles conflicts (duplicate trades) gracefully.
+    4.  Saves failed messages to a MongoDB collection for later analysis.
+-   **Output:** Stores trade data in a PostgreSQL database.
+
+### `archive-repeater`
+-   **Input:** Reads historical logs from a MongoDB collection.
+-   **Logic:**
+    1.  Fetches logs in batches.
+    2.  Parses the logs into `trade.Trade` or `trade.Swap` formats.
+    3.  Publishes the parsed messages to the appropriate RabbitMQ queues.
+    4.  Deletes the processed logs from MongoDB.
+-   **Output:** Republishes historical data to the message queues.
+
 ### Infrastructure
 -   **RabbitMQ:** Message broker with two main queues: `pool-swaps` (for raw data) and `trades` (for standardized data). It is configured for persistence.
 -   **Redis:** Used as a cache by the `pancake-relay` to store token metadata for pool addresses.
