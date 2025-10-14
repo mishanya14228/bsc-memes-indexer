@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"math/big"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -17,9 +20,11 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
 	pancakeabi "github.com/mikhailzakipniy/bsc-memes-indexer/shared/abi"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/queue"
+	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/redis_keys"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/trade"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -34,18 +39,42 @@ func init() {
 	}
 }
 
-// Producer handles the connection and subscription to the blockchain and RabbitMQ.
+// SkippedBlockRange defines the message for the skipped blocks queue
+type SkippedBlockRange struct {
+	Start uint64 `json:"start"`
+	End   uint64 `json:"end"`
+}
+
+// Producer handles the full lifecycle of the service.
 type Producer struct {
-	ethClient   *ethclient.Client
-	amqpConn    *amqp.Connection
-	amqpChannel *amqp.Channel
+	ethWSSClient  *ethclient.Client
+	ethHTTPClient *ethclient.Client
+	redisClient   *redis.Client
+	amqpConn      *amqp.Connection
+	amqpChannel   *amqp.Channel
+
+	lastProcessedBlock atomic.Uint64
 }
 
 // NewProducer creates and returns a new Producer.
-func NewProducer(wssURL, rabbitmqURL string) (*Producer, error) {
-	ethClient, err := ethclient.Dial(wssURL)
+func NewProducer(wssURL, httpURL, rabbitmqURL, redisURL string) (*Producer, error) {
+	ethWSSClient, err := ethclient.Dial(wssURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to dial eth client: %w", err)
+		return nil, fmt.Errorf("failed to dial eth wss client: %w", err)
+	}
+
+	ethHTTPClient, err := ethclient.Dial(httpURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial eth http client: %w", err)
+	}
+
+	opt, err := redis.ParseURL(redisURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse redis url: %w", err)
+	}
+	redisClient := redis.NewClient(opt)
+	if err := redisClient.Ping(context.Background()).Err(); err != nil {
+		return nil, fmt.Errorf("failed to ping redis: %w", err)
 	}
 
 	amqpConn, err := amqp.Dial(rabbitmqURL)
@@ -58,27 +87,75 @@ func NewProducer(wssURL, rabbitmqURL string) (*Producer, error) {
 		return nil, fmt.Errorf("failed to open amqp channel: %w", err)
 	}
 
-	_, err = amqpChannel.QueueDeclare(
-		queue.PoolSwapsQueue, // name
-		true,                 // durable
-		false,                // delete when unused
-		false,                // exclusive
-		false,                // no-wait
-		nil,                  // arguments
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to declare a queue: %w", err)
+	queues := []string{queue.PoolSwapsQueue, queue.PancakeSkippedBlocksQueue}
+	for _, q := range queues {
+		_, err = amqpChannel.QueueDeclare(q, true, false, false, false, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to declare queue %s: %w", q, err)
+		}
 	}
 
 	return &Producer{
-		ethClient:   ethClient,
-		amqpConn:    amqpConn,
-		amqpChannel: amqpChannel,
+		ethWSSClient:  ethWSSClient,
+		ethHTTPClient: ethHTTPClient,
+		redisClient:   redisClient,
+		amqpConn:      amqpConn,
+		amqpChannel:   amqpChannel,
 	}, nil
 }
 
-// Start begins the log subscription and returns channels for swaps and errors.
-func (p *Producer) Start(ctx context.Context) (<-chan *trade.Swap, <-chan error) {
+// handleStartupCatchup checks for missed blocks and publishes the range to a queue.
+func (p *Producer) handleStartupCatchup(ctx context.Context) error {
+	lastBlockStr, err := p.redisClient.Get(ctx, redis_keys.LastBlockPancake).Result()
+	if errors.Is(err, redis.Nil) {
+		log.Println("[info] No last processed block found in Redis (first run). Starting from current block.")
+		currentBlock, err := p.ethHTTPClient.BlockNumber(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get current block number on first run: %w", err)
+		}
+		p.lastProcessedBlock.Store(currentBlock)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to get last block from redis: %w", err)
+	}
+
+	lastBlock, _ := strconv.ParseUint(lastBlockStr, 10, 64)
+	p.lastProcessedBlock.Store(lastBlock)
+
+	currentBlock, err := p.ethHTTPClient.BlockNumber(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get current block number: %w", err)
+	}
+
+	if lastBlock < currentBlock {
+		log.Printf("[info] Gap detected. Last processed block: %d, Current block: %d", lastBlock, currentBlock)
+		skippedRange := SkippedBlockRange{Start: lastBlock + 1, End: currentBlock}
+		body, err := json.Marshal(skippedRange)
+		if err != nil {
+			return fmt.Errorf("failed to marshal skipped block range: %w", err)
+		}
+
+		if err := p.amqpChannel.PublishWithContext(ctx, "", queue.PancakeSkippedBlocksQueue, false, false, amqp.Publishing{
+			ContentType:  "application/json",
+			DeliveryMode: amqp.Persistent,
+			Body:         body,
+		}); err != nil {
+			return fmt.Errorf("failed to publish skipped block range: %w", err)
+		}
+		log.Printf("[info] Published skipped block range %d-%d to queue %s", skippedRange.Start, skippedRange.End, queue.PancakeSkippedBlocksQueue)
+
+		if err := p.redisClient.Del(ctx, redis_keys.LastBlockPancake).Err(); err != nil {
+			return fmt.Errorf("failed to delete redis key: %w", err)
+		}
+		log.Printf("[info] Consumed and deleted checkpoint key from Redis: %s", redis_keys.LastBlockPancake)
+	}
+
+	return nil
+}
+
+// startSubscription starts the WebSocket subscription.
+func (p *Producer) startSubscription(ctx context.Context) (<-chan *trade.Swap, <-chan error) {
 	logs := make(chan types.Log)
 	swaps := make(chan *trade.Swap)
 	errChan := make(chan error, 1)
@@ -87,7 +164,7 @@ func (p *Producer) Start(ctx context.Context) (<-chan *trade.Swap, <-chan error)
 		Topics: [][]common.Hash{{pancakeABI.Events["Swap"].ID}},
 	}
 
-	sub, err := p.ethClient.SubscribeFilterLogs(ctx, query, logs)
+	sub, err := p.ethWSSClient.SubscribeFilterLogs(ctx, query, logs)
 	if err != nil {
 		errChan <- err
 		return nil, errChan
@@ -107,7 +184,7 @@ func (p *Producer) Start(ctx context.Context) (<-chan *trade.Swap, <-chan error)
 				errChan <- err
 				return
 			case vLog := <-logs:
-				processedSwap, err := p.processLog(ctx, vLog)
+				processedSwap, err := p.processLog(vLog)
 				if err != nil {
 					log.Printf("[warn] failed to process log: %v", err)
 					continue
@@ -126,38 +203,39 @@ func (p *Producer) Publish(ctx context.Context, swap *trade.Swap) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal swap: %w", err)
 	}
-
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	return p.amqpChannel.PublishWithContext(ctx,
-		"",                   // exchange
-		queue.PoolSwapsQueue, // routing key
-		false,                // mandatory
-		false,                // immediate
-		amqp.Publishing{
-			ContentType:  "application/json",
-			DeliveryMode: amqp.Persistent,
-			Body:         body,
-		},
-	)
+	return p.amqpChannel.PublishWithContext(ctx, "", queue.PoolSwapsQueue, false, false, amqp.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: amqp.Persistent,
+		Body:         body,
+	})
 }
 
-// Close terminates all connections.
-func (p *Producer) Close() {
-	p.ethClient.Close()
+// Close handles graceful shutdown.
+func (p *Producer) Close(ctx context.Context) {
+	log.Println("[info] Saving last processed block to Redis...")
+	lastBlock := p.lastProcessedBlock.Load()
+
+	if lastBlock > 0 {
+		if err := p.redisClient.Set(ctx, redis_keys.LastBlockPancake, lastBlock, 0).Err(); err != nil {
+			log.Printf("[error] failed to save last processed block to redis: %v", err)
+		} else {
+			log.Printf("[info] Successfully saved last processed block: %d", lastBlock)
+		}
+	}
+
+	p.ethWSSClient.Close()
+	p.ethHTTPClient.Close()
 	p.amqpChannel.Close()
 	p.amqpConn.Close()
+	p.redisClient.Close()
 }
 
-func (p *Producer) processLog(ctx context.Context, vLog types.Log) (*trade.Swap, error) {
-	// The non-indexed arguments are packed into the Data field.
+func (p *Producer) processLog(vLog types.Log) (*trade.Swap, error) {
 	unpackedData, err := pancakeABI.Events["Swap"].Inputs.NonIndexed().Unpack(vLog.Data)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unpack log data: %w", err)
 	}
 
-	// The indexed fields are stored in the Topics.
 	if len(vLog.Topics) < 3 {
 		return nil, fmt.Errorf("invalid swap event: expected at least 3 topics, got %d", len(vLog.Topics))
 	}
@@ -165,7 +243,6 @@ func (p *Producer) processLog(ctx context.Context, vLog types.Log) (*trade.Swap,
 	senderAddress := common.BytesToAddress(vLog.Topics[1].Bytes())
 	toAddress := common.BytesToAddress(vLog.Topics[2].Bytes())
 
-	// Map the unpacked non-indexed data to the correct fields.
 	amount0In := unpackedData[0].(*big.Int)
 	amount1In := unpackedData[1].(*big.Int)
 	amount0Out := unpackedData[2].(*big.Int)
@@ -174,7 +251,7 @@ func (p *Producer) processLog(ctx context.Context, vLog types.Log) (*trade.Swap,
 	return &trade.Swap{
 		PoolAddress: vLog.Address,
 		Block:       vLog.BlockNumber,
-		Timestamp:   uint64(time.Now().Unix()), // Use processing time instead of block time
+		Timestamp:   uint64(time.Now().Unix()),
 		TxHash:      vLog.TxHash,
 		Sender:      senderAddress,
 		To:          toAddress,
@@ -186,47 +263,50 @@ func (p *Producer) processLog(ctx context.Context, vLog types.Log) (*trade.Swap,
 }
 
 func main() {
-	err := godotenv.Load()
-	if err != nil {
+	if err := godotenv.Load(); err != nil {
 		log.Println("[info] .env file not found, relying on environment variables")
 	}
 
 	wssURL := os.Getenv("BSC_WSS_URL")
+	httpURL := os.Getenv("BSC_RPC_URL")
 	rabbitmqURL := os.Getenv("RABBITMQ_URL")
-
-	if wssURL == "" || rabbitmqURL == "" {
-		log.Fatalf("[fatal] BSC_WSS_URL and RABBITMQ_URL must be set")
+	redisURL := os.Getenv("REDIS_URL")
+	if wssURL == "" || httpURL == "" || rabbitmqURL == "" || redisURL == "" {
+		log.Fatalf("[fatal] BSC_WSS_URL, BSC_RPC_URL, RABBITMQ_URL, and REDIS_URL must be set")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+
+	producer, err := NewProducer(wssURL, httpURL, rabbitmqURL, redisURL)
+	if err != nil {
+		log.Fatalf("[fatal] failed to create producer: %v", err)
+	}
 
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigChan
 		log.Println("[info] received signal, shutting down...")
+		producer.Close(context.Background())
 		cancel()
 	}()
 
-	producer, err := NewProducer(wssURL, rabbitmqURL)
-	if err != nil {
-		log.Fatalf("[fatal] failed to create producer: %v", err)
+	if err := producer.handleStartupCatchup(ctx); err != nil {
+		log.Fatalf("[fatal] failed during startup catchup: %v", err)
 	}
-	defer producer.Close()
 
-	swaps, errChan := producer.Start(ctx)
+	swaps, errChan := producer.startSubscription(ctx)
 
 	log.Println("[info] starting pancake swap producer...")
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[info] shutting down producer loop.")
+			log.Println("[info] producer shut down cleanly.")
 			return
 		case err, ok := <-errChan:
 			if !ok {
-				log.Println("[info] error channel closed.")
+				log.Println("[info] subscription error channel closed.")
 				return
 			}
 			if err != nil {
@@ -237,6 +317,8 @@ func main() {
 				log.Println("[info] swaps channel closed.")
 				return
 			}
+
+			producer.lastProcessedBlock.Store(swap.Block)
 			if err := producer.Publish(ctx, swap); err != nil {
 				log.Printf("[warn] failed to publish swap: %v", err)
 			} else {
