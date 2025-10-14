@@ -135,9 +135,7 @@ func (r *Repeater) processBatch(ctx context.Context) error {
 
 	collection := r.mongoClient.Database(dbName).Collection(collectionName)
 
-	findOpts := options.Find().
-		SetLimit(batchSize).
-		SetSort(bson.D{{Key: "blockNumber", Value: 1}, {Key: "logIndex", Value: 1}})
+	findOpts := options.Find().SetLimit(batchSize)
 
 	cursor, err := collection.Find(ctx, bson.M{}, findOpts)
 	if err != nil {
