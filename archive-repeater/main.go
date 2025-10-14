@@ -25,7 +25,7 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-const batchSize = 2000
+const batchSize = 20000
 
 var errNoRecords = errors.New("no records available")
 
