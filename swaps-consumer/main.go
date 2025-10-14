@@ -206,8 +206,8 @@ func (c *Consumer) bulkInsert(messages []amqp.Delivery) error {
 		valueArgs = append(valueArgs, t.Trader.Hex())
 		valueArgs = append(valueArgs, t.Direction)
 		valueArgs = append(valueArgs, t.Token.Hex())
-		valueArgs = append(valueArgs, t.TokensAmount.Int64())
-		valueArgs = append(valueArgs, t.BnbAmount.Int64())
+		valueArgs = append(valueArgs, t.TokensAmount.Int64()/1_000_000_000)
+		valueArgs = append(valueArgs, t.BnbAmount.Int64()/1_000_000_000)
 		valueArgs = append(valueArgs, t.TxHash.Hex())
 		valueArgs = append(valueArgs, t.Platform)
 	}
