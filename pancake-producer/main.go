@@ -6,38 +6,25 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math/big"
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
-	pancakeabi "github.com/mikhailzakipniy/bsc-memes-indexer/shared/abi"
+	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/pancake"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/queue"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/redis_keys"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/trade"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
-
-var pancakeABI abi.ABI
-
-func init() {
-	var err error
-	pancakeABI, err = abi.JSON(strings.NewReader(pancakeabi.PancakeSwapPairABI))
-	if err != nil {
-		panic(fmt.Sprintf("failed to parse pancake ABI: %v", err))
-	}
-}
 
 // SkippedBlockRange defines the message for the skipped blocks queue
 type SkippedBlockRange struct {
@@ -161,7 +148,7 @@ func (p *Producer) startSubscription(ctx context.Context) (<-chan *trade.Swap, <
 	errChan := make(chan error, 1)
 
 	query := ethereum.FilterQuery{
-		Topics: [][]common.Hash{{pancakeABI.Events["Swap"].ID}},
+		Topics: [][]common.Hash{{pancake.SwapEventTopic()}},
 	}
 
 	sub, err := p.ethWSSClient.SubscribeFilterLogs(ctx, query, logs)
@@ -231,35 +218,7 @@ func (p *Producer) Close(ctx context.Context) {
 }
 
 func (p *Producer) processLog(vLog types.Log) (*trade.Swap, error) {
-	unpackedData, err := pancakeABI.Events["Swap"].Inputs.NonIndexed().Unpack(vLog.Data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unpack log data: %w", err)
-	}
-
-	if len(vLog.Topics) < 3 {
-		return nil, fmt.Errorf("invalid swap event: expected at least 3 topics, got %d", len(vLog.Topics))
-	}
-
-	senderAddress := common.BytesToAddress(vLog.Topics[1].Bytes())
-	toAddress := common.BytesToAddress(vLog.Topics[2].Bytes())
-
-	amount0In := unpackedData[0].(*big.Int)
-	amount1In := unpackedData[1].(*big.Int)
-	amount0Out := unpackedData[2].(*big.Int)
-	amount1Out := unpackedData[3].(*big.Int)
-
-	return &trade.Swap{
-		PoolAddress: vLog.Address,
-		Block:       vLog.BlockNumber,
-		Timestamp:   uint64(time.Now().Unix()),
-		TxHash:      vLog.TxHash,
-		Sender:      senderAddress,
-		To:          toAddress,
-		Amount0In:   amount0In,
-		Amount1In:   amount1In,
-		Amount0Out:  amount0Out,
-		Amount1Out:  amount1Out,
-	}, nil
+	return pancake.ParseSwapFromLog(vLog, uint64(time.Now().Unix()))
 }
 
 func main() {

@@ -32,6 +32,21 @@ services:
       timeout: 5s
       retries: 5
 
+  mongodb:
+    image: 'mongo:7'
+    ports:
+      - '27017:27017'
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   four-meme-producer:
     build:
       context: .
@@ -71,6 +86,20 @@ services:
       redis:
         condition: service_healthy
 
+  four-meme-backtracker:
+    build:
+      context: .
+      dockerfile: four-meme-backtracker/Dockerfile
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   redis-data:
   rabbitmq-data:
+  mongo-data:

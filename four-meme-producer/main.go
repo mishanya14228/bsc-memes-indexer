@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"math/big"
 	"os"
 	"os/signal"
 	"strconv"
@@ -15,36 +14,19 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/contracts"
+	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/fourmeme"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/queue"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/redis_keys"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/topics"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/trade"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
-
-var dataTypes abi.Arguments
-
-func init() {
-	mustType := func(t string) abi.Type {
-		ty, err := abi.NewType(t, "", nil)
-		if err != nil {
-			panic(fmt.Sprintf("failed to create type: %v", err))
-		}
-		return ty
-	}
-	dataTypes = abi.Arguments{
-		{Type: mustType("address")}, {Type: mustType("address")}, {Type: mustType("uint256")},
-		{Type: mustType("uint256")}, {Type: mustType("uint256")}, {Type: mustType("uint256")},
-		{Type: mustType("uint256")}, {Type: mustType("uint256")},
-	}
-}
 
 // SkippedBlockRange defines the message for the skipped blocks queue
 type SkippedBlockRange struct {
@@ -243,25 +225,7 @@ func (p *Producer) Close(ctx context.Context) {
 }
 
 func (p *Producer) processLog(vLog types.Log) (*trade.Trade, error) {
-	direction := "sell"
-	if vLog.Topics[0] == topics.FourMemeBuyTopic {
-		direction = "buy"
-	}
-	unpackedData, err := dataTypes.Unpack(vLog.Data)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unpack log data for tx %s: %w", vLog.TxHash.Hex(), err)
-	}
-	return &trade.Trade{
-		Platform:     "four.meme",
-		Block:        vLog.BlockNumber,
-		Timestamp:    uint64(time.Now().Unix()),
-		TxHash:       vLog.TxHash,
-		Direction:    direction,
-		Token:        unpackedData[0].(common.Address),
-		Trader:       unpackedData[1].(common.Address),
-		TokensAmount: unpackedData[3].(*big.Int),
-		BnbAmount:    unpackedData[4].(*big.Int),
-	}, nil
+	return fourmeme.ParseTradeFromLog(vLog, uint64(time.Now().Unix()))
 }
 
 func main() {
