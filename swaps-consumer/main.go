@@ -99,6 +99,10 @@ func NewConsumer(postgresURL, rabbitmqURL, mongoURL string) (*Consumer, error) {
 		return nil, fmt.Errorf("failed to open a channel: %w", err)
 	}
 
+	if err := amqpChannel.Qos(5000, 0, false); err != nil {
+		return nil, fmt.Errorf("failed to set QoS: %w", err)
+	}
+
 	_, err = amqpChannel.QueueDeclare(
 		"trades", // name
 		true,     // durable
