@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -190,13 +191,25 @@ func run(ctx context.Context, fromBlock, toBlock uint64) error {
 	ranges := buildRanges(fromBlock, toBlock)
 	log.Printf("[info] processing %d chunk(s) covering range %d-%d with concurrency %d", len(ranges), fromBlock, toBlock, maxConcurrentChunks)
 
+	totalBlocksToProcess := toBlock - fromBlock + 1
+	var processedBlocks atomic.Uint64
+
 	g, gCtx := errgroup.WithContext(ctx)
 	g.SetLimit(maxConcurrentChunks)
 
 	for _, r := range ranges {
 		r := r
 		g.Go(func() error {
-			return processChunk(gCtx, client, collection, timestamps, r)
+			if err := processChunk(gCtx, client, collection, timestamps, r); err != nil {
+				return err
+			}
+
+			chunkBlockCount := r.end - r.start + 1
+			processedCount := processedBlocks.Add(chunkBlockCount)
+			remainingCount := totalBlocksToProcess - processedCount
+
+			log.Printf("[info] Finished chunk %d-%d. Blocks remaining: %d", r.start, r.end, remainingCount)
+			return nil
 		})
 	}
 
@@ -264,8 +277,6 @@ func processPancakeRange(ctx context.Context, client *ethclient.Client, coll *go
 }
 
 func processChunk(ctx context.Context, client *ethclient.Client, coll *goMongo.Collection, cache *timestampCache, r blockRange) error {
-	log.Printf("[info] processing chunk %d-%d", r.start, r.end)
-
 	if err := processFourMemeRange(ctx, client, coll, cache, r.start, r.end); err != nil {
 		return fmt.Errorf("four.meme range %d-%d: %w", r.start, r.end, err)
 	}
