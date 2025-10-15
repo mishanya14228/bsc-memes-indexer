@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/ethereum/go-ethereum"
 	"log"
@@ -28,14 +29,19 @@ import (
 )
 
 const (
-	platformName      = "Pancake"
-	maxRetries        = 5
-	initialRetryDelay = 1 * time.Second
+	platformName        = "Pancake"
+	maxRetries          = 5
+	initialRetryDelay   = 1 * time.Second
+	blacklistPoolPrefix = "blacklist:pool:"
+	blacklistTTL        = 24 * time.Hour
 )
 
 var (
 	pancakePoolABI abi.ABI
 	tokenABI       abi.ABI
+
+	ErrPoolBlacklisted  = errors.New("pool is blacklisted")
+	ErrTokenFetchFailed = errors.New("failed to fetch token after retries")
 )
 
 func init() {
@@ -85,8 +91,33 @@ func NewRelay(rpcURL, rabbitmqURL, redisURL string) (*Relay, error) {
 		return nil, fmt.Errorf("failed to open amqp channel: %w", err)
 	}
 
-	// Declare the queue we are consuming from
-	_, err = amqpChannel.QueueDeclare(queue.PoolSwapsQueue, true, false, false, false, nil)
+	// --- DLQ Setup ---
+	dlxName := "pool-swaps-dlx"
+	dlqName := "pool-swaps-dlq"
+
+	// Declare the dead-letter exchange
+	err = amqpChannel.ExchangeDeclare(dlxName, "direct", true, false, false, false, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to declare dlx: %w", err)
+	}
+
+	// Declare the dead-letter queue
+	_, err = amqpChannel.QueueDeclare(dlqName, true, false, false, false, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to declare dlq: %w", err)
+	}
+
+	// Bind the DLQ to the DLX
+	err = amqpChannel.QueueBind(dlqName, "", dlxName, false, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to bind dlq to dlx: %w", err)
+	}
+
+	// Declare the queue we are consuming from, now with DLQ args
+	args := amqp.Table{
+		"x-dead-letter-exchange": dlxName,
+	}
+	_, err = amqpChannel.QueueDeclare(queue.PoolSwapsQueue, true, false, false, false, args)
 	if err != nil {
 		return nil, fmt.Errorf("failed to declare consumer queue: %w", err)
 	}
@@ -113,6 +144,14 @@ func NewRelay(rpcURL, rabbitmqURL, redisURL string) (*Relay, error) {
 
 // loadPoolTokens fetches token addresses for a pool, with caching and retries.
 func (r *Relay) loadPoolTokens(ctx context.Context, poolAddress common.Address) (common.Address, common.Address, error) {
+	// Check blacklist first
+	isBlacklisted, err := r.redisClient.Exists(ctx, blacklistPoolPrefix+poolAddress.Hex()).Result()
+	if err != nil {
+		log.Printf("[warn] failed to check blacklist for pool %s: %v", poolAddress.Hex(), err)
+	} else if isBlacklisted > 0 {
+		return common.Address{}, common.Address{}, ErrPoolBlacklisted
+	}
+
 	cacheKey := fmt.Sprintf("pool:%s", poolAddress.Hex())
 
 	// Check cache first
@@ -145,7 +184,10 @@ func (r *Relay) loadPoolTokens(ctx context.Context, poolAddress common.Address) 
 		delay *= 2
 	}
 	if err != nil {
-		return common.Address{}, common.Address{}, fmt.Errorf("failed to get token0 after %d retries: %w", maxRetries, err)
+		if err := r.redisClient.Set(ctx, blacklistPoolPrefix+poolAddress.Hex(), "true", blacklistTTL).Err(); err != nil {
+			log.Printf("[warn] failed to add pool %s to blacklist: %v", poolAddress.Hex(), err)
+		}
+		return common.Address{}, common.Address{}, fmt.Errorf("failed to get token0 after %d retries: %w", maxRetries, ErrTokenFetchFailed)
 	}
 
 	delay = initialRetryDelay
@@ -159,7 +201,10 @@ func (r *Relay) loadPoolTokens(ctx context.Context, poolAddress common.Address) 
 		delay *= 2
 	}
 	if err != nil {
-		return common.Address{}, common.Address{}, fmt.Errorf("failed to get token1 after %d retries: %w", maxRetries, err)
+		if err := r.redisClient.Set(ctx, blacklistPoolPrefix+poolAddress.Hex(), "true", blacklistTTL).Err(); err != nil {
+			log.Printf("[warn] failed to add pool %s to blacklist: %v", poolAddress.Hex(), err)
+		}
+		return common.Address{}, common.Address{}, fmt.Errorf("failed to get token1 after %d retries: %w", maxRetries, ErrTokenFetchFailed)
 	}
 
 	token0 = common.BytesToAddress(rawToken0)
@@ -308,9 +353,21 @@ func main() {
 			}
 
 			if err := relay.processAndRelaySwap(ctx, &swap); err != nil {
-				log.Printf("[warn] failed to process and relay swap: %v. Requeueing.", err)
-				if err := d.Nack(false, true); err != nil {
-					log.Printf("[warn] failed to nack message: %v", err)
+				if errors.Is(err, ErrPoolBlacklisted) {
+					log.Printf("[warn] pool %s is blacklisted. Discarding message.", swap.PoolAddress.Hex())
+					if err := d.Reject(false); err != nil {
+						log.Printf("[warn] failed to reject blacklisted message: %v", err)
+					}
+				} else if errors.Is(err, ErrTokenFetchFailed) {
+					log.Printf("[error] failed to fetch tokens for pool %s, blacklisting it. Discarding message.", swap.PoolAddress.Hex())
+					if err := d.Reject(false); err != nil {
+						log.Printf("[warn] failed to reject message after blacklisting: %v", err)
+					}
+				} else {
+					log.Printf("[warn] failed to process and relay swap: %v. Requeueing.", err)
+					if err := d.Nack(false, true); err != nil {
+						log.Printf("[warn] failed to nack message: %v", err)
+					}
 				}
 			} else {
 				if err := d.Ack(false); err != nil {
