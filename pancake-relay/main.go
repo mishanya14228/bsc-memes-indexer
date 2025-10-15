@@ -114,10 +114,11 @@ func NewRelay(rpcURL, rabbitmqURL, redisURL string) (*Relay, error) {
 	}
 
 	// Declare the queue we are consuming from, now with DLQ args
-	args := amqp.Table{
-		"x-dead-letter-exchange": dlxName,
-	}
-	_, err = amqpChannel.QueueDeclare(queue.PoolSwapsQueue, true, false, false, false, args)
+	//args := amqp.Table{
+	//	"x-dead-letter-exchange": dlxName,
+	//}
+	_, err = amqpChannel.QueueDeclare(queue.PoolSwapsQueue, true, false, false, false, nil)
+	//_, err = amqpChannel.QueueDeclare(queue.PoolSwapsQueue, true, false, false, false, args)
 	if err != nil {
 		return nil, fmt.Errorf("failed to declare consumer queue: %w", err)
 	}
