@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	bufferSize    = 100
+	bufferSize    = 500
 	bufferTimeout = 30 * time.Second
 )
 
