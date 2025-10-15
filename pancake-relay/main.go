@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"github.com/ethereum/go-ethereum"
@@ -93,6 +95,12 @@ func NewRelay(rpcURL, rabbitmqURL, redisURL string) (*Relay, error) {
 	_, err = amqpChannel.QueueDeclare(queue.TradesQueue, true, false, false, false, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to declare producer queue: %w", err)
+	}
+
+	// Set QoS to limit message fetching
+	err = amqpChannel.Qos(100, 0, false)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set QoS: %w", err)
 	}
 
 	return &Relay{
@@ -257,7 +265,15 @@ func main() {
 	defer relay.amqpChannel.Close()
 	defer relay.redisClient.Close()
 
-	msgs, err := relay.amqpChannel.Consume(queue.PoolSwapsQueue, "pancake-relay", true, false, false, false, nil)
+	// Generate a unique suffix for the consumer tag
+	randomBytes := make([]byte, 4)
+	if _, err := rand.Read(randomBytes); err != nil {
+		log.Fatalf("[fatal] failed to generate random bytes for consumer tag: %v", err)
+	}
+	consumerTag := fmt.Sprintf("pancake-relay-%s", hex.EncodeToString(randomBytes))
+	log.Printf("[info] registering consumer with tag: %s", consumerTag)
+
+	msgs, err := relay.amqpChannel.Consume(queue.PoolSwapsQueue, consumerTag, false, false, false, false, nil)
 	if err != nil {
 		log.Fatalf("[fatal] failed to register a consumer: %v", err)
 	}
@@ -284,12 +300,22 @@ func main() {
 
 			var swap trade.Swap
 			if err := json.Unmarshal(d.Body, &swap); err != nil {
-				log.Printf("[warn] failed to unmarshal swap message: %v", err)
+				log.Printf("[warn] failed to unmarshal swap message: %v. Discarding.", err)
+				if err := d.Reject(false); err != nil {
+					log.Printf("[warn] failed to reject message: %v", err)
+				}
 				continue
 			}
 
 			if err := relay.processAndRelaySwap(ctx, &swap); err != nil {
-				log.Printf("[warn] failed to process and relay swap: %v", err)
+				log.Printf("[warn] failed to process and relay swap: %v. Requeueing.", err)
+				if err := d.Nack(false, true); err != nil {
+					log.Printf("[warn] failed to nack message: %v", err)
+				}
+			} else {
+				if err := d.Ack(false); err != nil {
+					log.Printf("[warn] failed to ack message: %v", err)
+				}
 			}
 		}
 	}
