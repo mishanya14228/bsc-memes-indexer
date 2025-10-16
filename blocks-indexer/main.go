@@ -30,10 +30,10 @@ import (
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/topics"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/trade"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"golang.org/x/sync/errgroup"
 )
 
 const (
-	blockBatchSize      = 10
 	retryDelayOnFailure = 3 * time.Second
 )
 
@@ -44,8 +44,11 @@ type Indexer struct {
 	redisClient   *redis.Client
 	amqpConn      *amqp.Connection
 	amqpChannel   *amqp.Channel
+	chainID       *big.Int
 
-	lastProcessedBlock atomic.Uint64
+	lastProcessedBlock    atomic.Uint64
+	blockBatchSize        uint64
+	historicalConcurrency int
 }
 
 // NewIndexer wires dependencies and declares required queues.
@@ -96,12 +99,39 @@ func NewIndexer(wssURL, httpURL, rabbitmqURL, redisURL string) (*Indexer, error)
 		return nil, fmt.Errorf("failed to declare queue %s: %w", queue.PoolSwapsQueue, err)
 	}
 
+	chainCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	chainID, err := ethHTTPClient.NetworkID(chainCtx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch network id: %w", err)
+	}
+	log.Printf("[info] detected network chain ID %s", chainID.String())
+
+	batchSizeStr := os.Getenv("BLOCKS_INDEXER_BATCH_SIZE")
+	batchSize, err := strconv.ParseUint(batchSizeStr, 10, 64)
+	if err != nil || batchSize == 0 {
+		log.Printf("[info] BLOCKS_INDEXER_BATCH_SIZE not set or invalid, using default value of 10")
+		batchSize = 10 // Default value
+	}
+
+	histConcurrency := 4
+	if concStr := os.Getenv("BLOCKS_INDEXER_HISTORICAL_CONCURRENCY"); concStr != "" {
+		if parsed, err := strconv.Atoi(concStr); err == nil && parsed > 0 {
+			histConcurrency = parsed
+		} else {
+			log.Printf("[info] BLOCKS_INDEXER_HISTORICAL_CONCURRENCY not set or invalid, using default value of %d", histConcurrency)
+		}
+	}
+
 	return &Indexer{
-		ethWSSClient:  ethWSSClient,
-		ethHTTPClient: ethHTTPClient,
-		redisClient:   redisClient,
-		amqpConn:      amqpConn,
-		amqpChannel:   amqpChannel,
+		ethWSSClient:          ethWSSClient,
+		ethHTTPClient:         ethHTTPClient,
+		redisClient:           redisClient,
+		amqpConn:              amqpConn,
+		amqpChannel:           amqpChannel,
+		chainID:               chainID,
+		blockBatchSize:        batchSize,
+		historicalConcurrency: histConcurrency,
 	}, nil
 }
 
@@ -155,6 +185,18 @@ func (i *Indexer) persistCheckpoint(ctx context.Context) {
 	}
 }
 
+func (i *Indexer) updateLastProcessed(value uint64) bool {
+	for {
+		current := i.lastProcessedBlock.Load()
+		if value <= current {
+			return false
+		}
+		if i.lastProcessedBlock.CompareAndSwap(current, value) {
+			return true
+		}
+	}
+}
+
 // Run performs a historical catch-up (if needed) and then starts the live subscription loop.
 func (i *Indexer) Run(ctx context.Context, overrideStart uint64) error {
 	if err := i.initializeCheckpoint(ctx, overrideStart); err != nil {
@@ -173,11 +215,14 @@ func (i *Indexer) Run(ctx context.Context, overrideStart uint64) error {
 
 // catchUpHistorical replays any missed blocks between the stored checkpoint and the current chain tip.
 func (i *Indexer) catchUpHistorical(ctx context.Context) error {
+	workers := i.historicalConcurrency
+	if workers < 1 {
+		workers = 1
+	}
+
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 
 		latest, err := i.ethHTTPClient.BlockNumber(ctx)
@@ -190,22 +235,44 @@ func (i *Indexer) catchUpHistorical(ctx context.Context) error {
 			return nil
 		}
 
-		end := next + blockBatchSize - 1
-		if end > latest {
-			end = latest
+		batches := make([][]*types.Header, 0, workers)
+		var firstRangeStart uint64
+		for len(batches) < workers && next <= latest {
+			start := next
+			end := start + i.blockBatchSize - 1
+			if end > latest {
+				end = latest
+			}
+
+			headers := make([]*types.Header, 0, int(end-start+1))
+			for number := start; number <= end; number++ {
+				headers = append(headers, headerWithNumber(number))
+			}
+
+			if len(batches) == 0 {
+				firstRangeStart = start
+			}
+			batches = append(batches, headers)
+			next = end + 1
 		}
 
-		headers := make([]*types.Header, 0, end-next+1)
-		for number := next; number <= end; number++ {
-			headers = append(headers, headerWithNumber(number))
+		lastBatch := batches[len(batches)-1]
+		lastRangeEnd := lastBatch[len(lastBatch)-1].Number.Uint64()
+		log.Printf("[info] historical catch-up processing blocks %d-%d with concurrency %d", firstRangeStart, lastRangeEnd, len(batches))
+
+		var eg errgroup.Group
+		for _, batch := range batches {
+			batch := batch
+			eg.Go(func() error {
+				return i.processBatch(ctx, batch)
+			})
 		}
 
-		log.Printf("[info] historical catch-up processing blocks %d-%d", next, end)
-		if err := i.processBatch(ctx, headers); err != nil {
+		if err := eg.Wait(); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return err
 			}
-			log.Printf("[error] failed to process historical batch %d-%d: %v", next, end, err)
+			log.Printf("[error] failed to process historical batches %d-%d: %v", firstRangeStart, lastRangeEnd, err)
 			time.Sleep(retryDelayOnFailure)
 			continue
 		}
@@ -221,7 +288,7 @@ func (i *Indexer) runLive(ctx context.Context) error {
 	}
 	defer sub.Unsubscribe()
 
-	buffer := make([]*types.Header, 0, blockBatchSize)
+	buffer := make([]*types.Header, 0, int(i.blockBatchSize))
 
 	for {
 		select {
@@ -243,9 +310,9 @@ func (i *Indexer) runLive(ctx context.Context) error {
 			}
 
 			buffer = append(buffer, header)
-			for len(buffer) >= blockBatchSize {
-				batch := make([]*types.Header, blockBatchSize)
-				copy(batch, buffer[:blockBatchSize])
+			for len(buffer) >= int(i.blockBatchSize) {
+				batch := make([]*types.Header, int(i.blockBatchSize))
+				copy(batch, buffer[:int(i.blockBatchSize)])
 
 				if err := i.processBatch(ctx, batch); err != nil {
 					if errors.Is(err, context.Canceled) {
@@ -256,7 +323,7 @@ func (i *Indexer) runLive(ctx context.Context) error {
 					break
 				}
 
-				buffer = buffer[blockBatchSize:]
+				buffer = buffer[int(i.blockBatchSize):]
 			}
 		}
 	}
@@ -329,16 +396,15 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 				continue
 			}
 
-			originalTo := swapMsg.To
 			if tx := txByHash[vLog.TxHash]; tx != nil {
-				sender, err := senderFromTx(tx)
-				if err != nil {
-					log.Printf("[debug] failed to derive sender for tx %s: %v; keeping log-derived To %s", vLog.TxHash.Hex(), err, originalTo.Hex())
-				} else {
+				sender, err := senderFromTx(tx, i.chainID)
+				if err == nil {
 					swapMsg.To = sender
+				} else {
+					log.Printf("[warn] failed to derive sender for tx %s: %v", vLog.TxHash.Hex(), err)
 				}
 			} else {
-				log.Printf("[debug] missing transaction data for %s, keeping log-derived To %s", vLog.TxHash.Hex(), originalTo.Hex())
+				log.Printf("[warn] missing transaction data for %s; keeping log-derived recipient", vLog.TxHash.Hex())
 			}
 
 			if err := i.publishSwap(ctx, swapMsg); err != nil {
@@ -348,8 +414,9 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 	}
 
 	lastNumber := headers[len(headers)-1].Number.Uint64()
-	i.lastProcessedBlock.Store(lastNumber)
-	i.persistCheckpoint(ctx)
+	if i.updateLastProcessed(lastNumber) {
+		i.persistCheckpoint(ctx)
+	}
 
 	log.Printf("[info] processed block batch %d-%d (%d logs)", headers[0].Number.Uint64(), lastNumber, len(logs))
 	return nil
@@ -389,17 +456,34 @@ func headerWithNumber(number uint64) *types.Header {
 }
 
 // senderFromTx derives the sender address from the signed transaction data.
-func senderFromTx(tx *types.Transaction) (common.Address, error) {
+func senderFromTx(tx *types.Transaction, defaultChainID *big.Int) (common.Address, error) {
 	if tx == nil {
 		return common.Address{}, errors.New("transaction is nil")
 	}
 
-	if chainID := tx.ChainId(); chainID != nil {
+	if chainID := tx.ChainId(); chainID != nil && chainID.Sign() != 0 {
 		signer := types.LatestSignerForChainID(chainID)
-		return types.Sender(signer, tx)
+		addr, err := types.Sender(signer, tx)
+		if err != nil {
+			return common.Address{}, err
+		}
+		return addr, nil
 	}
 
-	return types.Sender(types.HomesteadSigner{}, tx)
+	if defaultChainID != nil && defaultChainID.Sign() != 0 {
+		signer := types.LatestSignerForChainID(defaultChainID)
+		addr, err := types.Sender(signer, tx)
+		if err != nil {
+			return common.Address{}, err
+		}
+		return addr, nil
+	}
+
+	addr, err := types.Sender(types.HomesteadSigner{}, tx)
+	if err != nil {
+		return common.Address{}, err
+	}
+	return addr, nil
 }
 
 // Close ensures connections and checkpoints are persisted gracefully.
