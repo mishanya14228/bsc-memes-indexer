@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"log"
+	"math/big"
 	"os"
 	"os/signal"
 	"strconv"
@@ -104,7 +106,14 @@ func NewIndexer(wssURL, httpURL, rabbitmqURL, redisURL string) (*Indexer, error)
 }
 
 // initializeCheckpoint loads the last processed block from Redis or seeds it with the current block number.
-func (i *Indexer) initializeCheckpoint(ctx context.Context) error {
+// An override greater than zero is treated as the last processed block value, bypassing Redis.
+func (i *Indexer) initializeCheckpoint(ctx context.Context, override uint64) error {
+	if override > 0 {
+		i.lastProcessedBlock.Store(override)
+		log.Printf("[info] startFrom override detected; treating block %d as already processed", override)
+		return nil
+	}
+
 	lastBlockStr, err := i.redisClient.Get(ctx, redis_keys.LastBlockBlocksIndexer).Result()
 	if errors.Is(err, redis.Nil) {
 		currentBlock, err := i.ethHTTPClient.BlockNumber(ctx)
@@ -146,12 +155,65 @@ func (i *Indexer) persistCheckpoint(ctx context.Context) {
 	}
 }
 
-// Run starts the subscription loop and processes blocks in batches.
-func (i *Indexer) Run(ctx context.Context) error {
-	if err := i.initializeCheckpoint(ctx); err != nil {
+// Run performs a historical catch-up (if needed) and then starts the live subscription loop.
+func (i *Indexer) Run(ctx context.Context, overrideStart uint64) error {
+	if err := i.initializeCheckpoint(ctx, overrideStart); err != nil {
 		return err
 	}
 
+	if err := i.catchUpHistorical(ctx); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		return err
+	}
+
+	return i.runLive(ctx)
+}
+
+// catchUpHistorical replays any missed blocks between the stored checkpoint and the current chain tip.
+func (i *Indexer) catchUpHistorical(ctx context.Context) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		latest, err := i.ethHTTPClient.BlockNumber(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get latest block number: %w", err)
+		}
+
+		next := i.lastProcessedBlock.Load() + 1
+		if next > latest {
+			return nil
+		}
+
+		end := next + blockBatchSize - 1
+		if end > latest {
+			end = latest
+		}
+
+		headers := make([]*types.Header, 0, end-next+1)
+		for number := next; number <= end; number++ {
+			headers = append(headers, headerWithNumber(number))
+		}
+
+		log.Printf("[info] historical catch-up processing blocks %d-%d", next, end)
+		if err := i.processBatch(ctx, headers); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			log.Printf("[error] failed to process historical batch %d-%d: %v", next, end, err)
+			time.Sleep(retryDelayOnFailure)
+			continue
+		}
+	}
+}
+
+// runLive subscribes to new block headers and processes them in batches.
+func (i *Indexer) runLive(ctx context.Context) error {
 	headers := make(chan *types.Header)
 	sub, err := i.ethWSSClient.SubscribeNewHead(ctx, headers)
 	if err != nil {
@@ -164,7 +226,7 @@ func (i *Indexer) Run(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			return nil
+			return ctx.Err()
 		case err := <-sub.Err():
 			if err != nil {
 				return fmt.Errorf("subscription error: %w", err)
@@ -186,7 +248,10 @@ func (i *Indexer) Run(ctx context.Context) error {
 				copy(batch, buffer[:blockBatchSize])
 
 				if err := i.processBatch(ctx, batch); err != nil {
-					log.Printf("[error] failed to process block batch %d-%d: %v", batch[0].Number.Uint64(), batch[len(batch)-1].Number.Uint64(), err)
+					if errors.Is(err, context.Canceled) {
+						return err
+					}
+					log.Printf("[error] failed to process live block batch %d-%d: %v", batch[0].Number.Uint64(), batch[len(batch)-1].Number.Uint64(), err)
 					time.Sleep(retryDelayOnFailure)
 					break
 				}
@@ -270,11 +335,6 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 				if err != nil {
 					log.Printf("[debug] failed to derive sender for tx %s: %v; keeping log-derived To %s", vLog.TxHash.Hex(), err, originalTo.Hex())
 				} else {
-					if originalTo != sender {
-						log.Printf("[debug] overriding swap To for tx %s from %s to sender %s", vLog.TxHash.Hex(), originalTo.Hex(), sender.Hex())
-					} else {
-						log.Printf("[debug] swap To for tx %s already equals sender %s", vLog.TxHash.Hex(), sender.Hex())
-					}
 					swapMsg.To = sender
 				}
 			} else {
@@ -323,6 +383,11 @@ func (i *Indexer) publishSwap(ctx context.Context, swapMsg *trade.Swap) error {
 	})
 }
 
+// headerWithNumber creates a lightweight header containing only the block number.
+func headerWithNumber(number uint64) *types.Header {
+	return &types.Header{Number: new(big.Int).SetUint64(number)}
+}
+
 // senderFromTx derives the sender address from the signed transaction data.
 func senderFromTx(tx *types.Transaction) (common.Address, error) {
 	if tx == nil {
@@ -356,6 +421,9 @@ func (i *Indexer) Close(ctx context.Context) {
 }
 
 func main() {
+	startFrom := flag.Uint64("startFrom", 0, "override the last processed block before startup (block number)")
+	flag.Parse()
+
 	if err := godotenv.Load(); err != nil {
 		log.Println("[info] .env file not found, relying on environment variables")
 	}
@@ -383,7 +451,7 @@ func main() {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		if err := indexer.Run(ctx); err != nil {
+		if err := indexer.Run(ctx, *startFrom); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("[error] indexer exited with error: %v", err)
 			cancel()
 		}

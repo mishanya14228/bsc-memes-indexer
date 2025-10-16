@@ -12,36 +12,21 @@ services:
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
-      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      test: [ "CMD", "rabbitmq-diagnostics", "ping" ]
       interval: 5s
       timeout: 10s
       retries: 5
 
   redis:
     image: 'redis:latest'
-    ports:
-      - '6379:6379'
+#    ports:
+#      - '6379:6379'
     command: redis-server --appendonly yes
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
-      timeout: 5s
-      retries: 5
-
-  mongodb:
-    image: 'mongo:7'
-    ports:
-      - '27017:27017'
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
-    volumes:
-      - mongo-data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
       timeout: 5s
       retries: 5
 
@@ -67,40 +52,12 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    scale: 4
     depends_on:
       rabbitmq:
         condition: service_healthy
       redis:
         condition: service_healthy
-
-  historical-fetcher:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        APP_NAME: historical-fetcher
-    env_file:
-      - .env
-    restart: unless-stopped
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  archive-repeater:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      args:
-        APP_NAME: archive-repeater
-    env_file:
-      - .env
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      mongodb:
-        condition: service_started
 
   swaps-consumer:
     build:
@@ -120,4 +77,3 @@ services:
 volumes:
   redis-data:
   rabbitmq-data:
-  mongo-data:
