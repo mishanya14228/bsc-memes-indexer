@@ -216,7 +216,7 @@ func (p *Producer) Publish(ctx context.Context, swap *trade.Swap) error {
 }
 
 // Close handles graceful shutdown.
-func (p *Producer) Close(ctx context.Cöntext) {
+func (p *Producer) Close(ctx context.Context) {
 	log.Println("[info] Saving last processed block to Redis...")
 	lastBlock := p.lastProcessedBlock.Load()
 
