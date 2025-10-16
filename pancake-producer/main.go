@@ -74,12 +74,30 @@ func NewProducer(wssURL, httpURL, rabbitmqURL, redisURL string) (*Producer, erro
 		return nil, fmt.Errorf("failed to open amqp channel: %w", err)
 	}
 
-	queues := []string{queue.PoolSwapsQueue, queue.PancakeSkippedBlocksQueue}
-	for _, q := range queues {
-		_, err = amqpChannel.QueueDeclare(q, true, false, false, false, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to declare queue %s: %w", q, err)
-		}
+	// --- DLQ Setup for PoolSwapsQueue ---
+	dlxName := "pool-swaps-dlx"
+
+	// Declare the dead-letter exchange (robustly, in case relay hasn't)
+	err = amqpChannel.ExchangeDeclare(dlxName, "direct", true, false, false, false, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to declare dlx: %w", err)
+	}
+
+	// Arguments for the main queue to link it to the DLX
+	args := amqp.Table{
+		"x-dead-letter-exchange": dlxName,
+	}
+
+	// Declare the main queue with DLQ args
+	_, err = amqpChannel.QueueDeclare(queue.PoolSwapsQueue, true, false, false, false, args)
+	if err != nil {
+		return nil, fmt.Errorf("failed to declare queue %s: %w", queue.PoolSwapsQueue, err)
+	}
+
+	// Declare the skipped blocks queue (without DLQ)
+	_, err = amqpChannel.QueueDeclare(queue.PancakeSkippedBlocksQueue, true, false, false, false, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to declare queue %s: %w", queue.PancakeSkippedBlocksQueue, err)
 	}
 
 	return &Producer{
@@ -198,7 +216,7 @@ func (p *Producer) Publish(ctx context.Context, swap *trade.Swap) error {
 }
 
 // Close handles graceful shutdown.
-func (p *Producer) Close(ctx context.Context) {
+func (p *Producer) Close(ctx context.Cöntext) {
 	log.Println("[info] Saving last processed block to Redis...")
 	lastBlock := p.lastProcessedBlock.Load()
 
