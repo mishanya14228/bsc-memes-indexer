@@ -305,7 +305,16 @@ func (i *Indexer) runLive(ctx context.Context) error {
 			}
 
 			last := i.lastProcessedBlock.Load()
-			if header.Number == nil || header.Number.Uint64() <= last {
+			if header.Number == nil {
+				continue
+			}
+
+			headerNumber := header.Number.Uint64()
+			if headerNumber > 0 && last < headerNumber-1 {
+				buffer = append(buffer, headerWithNumber(headerNumber-1))
+			}
+
+			if headerNumber <= last {
 				continue
 			}
 
