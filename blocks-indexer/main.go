@@ -180,8 +180,6 @@ func (i *Indexer) persistCheckpoint(ctx context.Context) {
 	}
 	if err := i.redisClient.Set(ctx, redis_keys.LastBlockBlocksIndexer, last, 0).Err(); err != nil {
 		log.Printf("[warn] failed to persist checkpoint %d: %v", last, err)
-	} else {
-		log.Printf("[info] persisted checkpoint at block %d", last)
 	}
 }
 
@@ -218,6 +216,54 @@ func (i *Indexer) catchUpHistorical(ctx context.Context) error {
 	workers := i.historicalConcurrency
 	if workers < 1 {
 		workers = 1
+	}
+
+	initialProcessed := i.lastProcessedBlock.Load()
+	startTime := time.Now()
+	progress := func(latest uint64) {
+		current := i.lastProcessedBlock.Load()
+		if current < initialProcessed {
+			return
+		}
+
+		total := latest
+		if total < initialProcessed {
+			total = initialProcessed
+		}
+		if total <= initialProcessed {
+			return
+		}
+
+		totalBlocks := total - initialProcessed
+		processed := current - initialProcessed
+		if processed > totalBlocks {
+			totalBlocks = processed
+		}
+		remaining := totalBlocks - processed
+
+		var percent float64
+		if totalBlocks > 0 {
+			percent = (float64(processed) / float64(totalBlocks)) * 100
+		}
+
+		etaStr := "estimating..."
+		if remaining == 0 {
+			etaStr = "0s"
+		} else if processed > 0 {
+			elapsed := time.Since(startTime)
+			secondsPerBlock := elapsed.Seconds() / float64(processed)
+			if secondsPerBlock < 0 {
+				secondsPerBlock = 0
+			}
+			etaSeconds := secondsPerBlock * float64(remaining)
+			if etaSeconds < 0 {
+				etaSeconds = 0
+			}
+			eta := time.Duration(etaSeconds * float64(time.Second))
+			etaStr = eta.Round(time.Second).String()
+		}
+
+		log.Printf("[info] historical catch-up progress: %d blocks left (%.2f%% complete), ETA %s", remaining, percent, etaStr)
 	}
 
 	for {
@@ -276,6 +322,8 @@ func (i *Indexer) catchUpHistorical(ctx context.Context) error {
 			time.Sleep(retryDelayOnFailure)
 			continue
 		}
+
+		progress(latest)
 	}
 }
 
