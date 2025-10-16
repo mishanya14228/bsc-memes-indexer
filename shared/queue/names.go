@@ -1,8 +1,6 @@
 package queue
 
 const (
-	TradesQueue                = "trades"
-	PoolSwapsQueue             = "pool-swaps"
-	FourMemeSkippedBlocksQueue = "four-meme-skipped-blocks"
-	PancakeSkippedBlocksQueue  = "pancake-skipped-blocks"
+	TradesQueue    = "trades"
+	PoolSwapsQueue = "pool-swaps"
 )

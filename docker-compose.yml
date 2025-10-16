@@ -45,40 +45,28 @@ services:
       timeout: 5s
       retries: 5
 
-  four-meme-producer:
+  blocks-indexer:
     build:
       context: .
-      dockerfile: four-meme-producer/Dockerfile
+      dockerfile: Dockerfile
+      args:
+        APP_NAME: blocks-indexer
     env_file:
       - .env
     restart: unless-stopped
     depends_on:
       rabbitmq:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  pancake-producer:
-    build:
-      context: .
-      dockerfile: pancake-producer/Dockerfile
-    env_file:
-      - .env
-    restart: unless-stopped
-    depends_on:
-      rabbitmq:
-        condition: service_healthy
-      redis:
         condition: service_healthy
 
   pancake-relay:
     build:
       context: .
-      dockerfile: pancake-relay/Dockerfile
+      dockerfile: Dockerfile
+      args:
+        APP_NAME: pancake-relay
     env_file:
       - .env
     restart: unless-stopped
-    scale: 8
     depends_on:
       rabbitmq:
         condition: service_healthy
@@ -88,7 +76,9 @@ services:
   historical-fetcher:
     build:
       context: .
-      dockerfile: historical-fetcher/Dockerfile
+      dockerfile: Dockerfile
+      args:
+        APP_NAME: historical-fetcher
     env_file:
       - .env
     restart: unless-stopped
@@ -101,7 +91,9 @@ services:
   archive-repeater:
     build:
       context: .
-      dockerfile: archive-repeater/Dockerfile
+      dockerfile: Dockerfile
+      args:
+        APP_NAME: archive-repeater
     env_file:
       - .env
     depends_on:
@@ -113,7 +105,9 @@ services:
   swaps-consumer:
     build:
       context: .
-      dockerfile: swaps-consumer/Dockerfile
+      dockerfile: Dockerfile
+      args:
+        APP_NAME: swaps-consumer
     env_file:
       - .env
     restart: unless-stopped
