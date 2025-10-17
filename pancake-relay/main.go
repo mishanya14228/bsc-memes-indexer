@@ -107,15 +107,16 @@ func NewRelay(rpcURL, rabbitmqURL, redisURL string) (*Relay, error) {
 		return nil, fmt.Errorf("failed to declare dlq: %w", err)
 	}
 
-	// Bind the DLQ to the DLX
-	err = amqpChannel.QueueBind(dlqName, "", dlxName, false, nil)
+	// Bind the DLQ to the DLX using the original routing key
+	err = amqpChannel.QueueBind(dlqName, queue.PoolSwapsQueue, dlxName, false, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to bind dlq to dlx: %w", err)
 	}
 
 	// Declare the queue we are consuming from, now with DLQ args
 	args := amqp.Table{
-		"x-dead-letter-exchange": dlxName,
+		"x-dead-letter-exchange":    dlxName,
+		"x-dead-letter-routing-key": queue.PoolSwapsQueue,
 	}
 	_, err = amqpChannel.QueueDeclare(queue.PoolSwapsQueue, true, false, false, false, args)
 	if err != nil {
