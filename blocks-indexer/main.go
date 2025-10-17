@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -20,6 +21,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/go-redis/redis/v8"
 	"github.com/joho/godotenv"
 	"github.com/mikhailzakipniy/bsc-memes-indexer/shared/contracts"
@@ -49,10 +51,11 @@ type Indexer struct {
 	lastProcessedBlock    atomic.Uint64
 	blockBatchSize        uint64
 	historicalConcurrency int
+	archiveEnabled        bool
 }
 
 // NewIndexer wires dependencies and declares required queues.
-func NewIndexer(wssURL, httpURL, rabbitmqURL, redisURL string) (*Indexer, error) {
+func NewIndexer(wssURL, httpURL, rabbitmqURL, redisURL string, archiveEnabled bool) (*Indexer, error) {
 	ethWSSClient, err := ethclient.Dial(wssURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to dial eth wss client: %w", err)
@@ -85,6 +88,14 @@ func NewIndexer(wssURL, httpURL, rabbitmqURL, redisURL string) (*Indexer, error)
 	// Declare queues we publish to.
 	if _, err := amqpChannel.QueueDeclare(queue.TradesQueue, true, false, false, false, nil); err != nil {
 		return nil, fmt.Errorf("failed to declare queue %s: %w", queue.TradesQueue, err)
+	}
+	if archiveEnabled {
+		archiveQueues := []string{queue.ArchiveBlocksQueue, queue.ArchiveLogsQueue}
+		for _, q := range archiveQueues {
+			if _, err := amqpChannel.QueueDeclare(q, true, false, false, false, nil); err != nil {
+				return nil, fmt.Errorf("failed to declare queue %s: %w", q, err)
+			}
+		}
 	}
 
 	dlxName := "pool-swaps-dlx"
@@ -132,6 +143,7 @@ func NewIndexer(wssURL, httpURL, rabbitmqURL, redisURL string) (*Indexer, error)
 		chainID:               chainID,
 		blockBatchSize:        batchSize,
 		historicalConcurrency: histConcurrency,
+		archiveEnabled:        archiveEnabled,
 	}, nil
 }
 
@@ -409,6 +421,19 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 	if err != nil {
 		return fmt.Errorf("failed to filter logs for range %s-%s: %w", from.String(), to.String(), err)
 	}
+	if i.archiveEnabled {
+		fromNumber := uint64(0)
+		toNumber := uint64(0)
+		if from != nil {
+			fromNumber = from.Uint64()
+		}
+		if to != nil {
+			toNumber = to.Uint64()
+		}
+		if err := i.publishArchiveLogs(ctx, fromNumber, toNumber, logs); err != nil {
+			log.Printf("[warn] failed to publish archive logs for range %d-%d: %v", fromNumber, toNumber, err)
+		}
+	}
 
 	blocks := make(map[uint64]*types.Block, len(headers))
 	txByHash := make(map[common.Hash]*types.Transaction)
@@ -418,6 +443,11 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 			return fmt.Errorf("failed to fetch block %s: %w", header.Number.String(), err)
 		}
 		blocks[block.NumberU64()] = block
+		if i.archiveEnabled {
+			if err := i.publishArchiveBlock(ctx, block); err != nil {
+				log.Printf("[warn] failed to publish archive block %d: %v", block.NumberU64(), err)
+			}
+		}
 		for _, tx := range block.Transactions() {
 			txByHash[tx.Hash()] = tx
 		}
@@ -507,6 +537,62 @@ func (i *Indexer) publishSwap(ctx context.Context, swapMsg *trade.Swap) error {
 	})
 }
 
+type archiveLogsPayload struct {
+	From uint64      `json:"from"`
+	To   uint64      `json:"to"`
+	Logs []types.Log `json:"logs"`
+}
+
+type archiveBlockPayload struct {
+	Number uint64 `json:"number"`
+	RLP    string `json:"rlp"`
+}
+
+func (i *Indexer) publishArchiveLogs(ctx context.Context, from, to uint64, logs []types.Log) error {
+	payload := archiveLogsPayload{
+		From: from,
+		To:   to,
+		Logs: logs,
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal archive logs payload: %w", err)
+	}
+
+	return i.amqpChannel.PublishWithContext(ctx, "", queue.ArchiveLogsQueue, false, false, amqp.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: amqp.Persistent,
+		Body:         body,
+	})
+}
+
+func (i *Indexer) publishArchiveBlock(ctx context.Context, block *types.Block) error {
+	if block == nil {
+		return errors.New("block is nil")
+	}
+
+	encoded, err := rlp.EncodeToBytes(block)
+	if err != nil {
+		return fmt.Errorf("failed to marshal block %d: %w", block.NumberU64(), err)
+	}
+
+	payload := archiveBlockPayload{
+		Number: block.NumberU64(),
+		RLP:    hex.EncodeToString(encoded),
+	}
+
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal archive block payload: %w", err)
+	}
+
+	return i.amqpChannel.PublishWithContext(ctx, "", queue.ArchiveBlocksQueue, false, false, amqp.Publishing{
+		ContentType:  "application/json",
+		DeliveryMode: amqp.Persistent,
+		Body:         body,
+	})
+}
+
 // headerWithNumber creates a lightweight header containing only the block number.
 func headerWithNumber(number uint64) *types.Header {
 	return &types.Header{Number: new(big.Int).SetUint64(number)}
@@ -563,6 +649,7 @@ func (i *Indexer) Close(ctx context.Context) {
 
 func main() {
 	startFrom := flag.Uint64("startFrom", 0, "override the last processed block before startup (block number)")
+	archiveEnabled := flag.Bool("archive", false, "publish raw blocks and logs to archive queues")
 	flag.Parse()
 
 	if err := godotenv.Load(); err != nil {
@@ -580,7 +667,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	indexer, err := NewIndexer(wssURL, httpURL, rabbitmqURL, redisURL)
+	indexer, err := NewIndexer(wssURL, httpURL, rabbitmqURL, redisURL, *archiveEnabled)
 	if err != nil {
 		log.Fatalf("[fatal] failed to create indexer: %v", err)
 	}

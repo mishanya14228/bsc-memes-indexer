@@ -1,4 +1,19 @@
 services:
+  mongodb:
+    image: 'mongo:7'
+    ports:
+      - '27017:27017'
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: [ "CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   rabbitmq:
     image: 'rabbitmq:3-management'
     hostname: rabbitmq
@@ -43,6 +58,21 @@ services:
       rabbitmq:
         condition: service_healthy
 
+  archive-collector:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        APP_NAME: archive-collector
+    env_file:
+      - .env
+    restart: unless-stopped
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      mongodb:
+        condition: service_started
+
   pancake-relay:
     build:
       context: .
@@ -77,3 +107,4 @@ services:
 volumes:
   redis-data:
   rabbitmq-data:
+  mongo-data:
