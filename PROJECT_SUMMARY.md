@@ -10,28 +10,27 @@ The system is orchestrated using Docker Compose and consists of several Go appli
 
 ### Data Flow
 
-1.  Two "producer" services listen for swap events on the BSC blockchain.
-    *   `four-meme-producer`: Listens for specific events from a single, hardcoded contract.
-    *   `pancake-producer`: Listens for generic `Swap` events from all contracts across the chain.
-2.  The producers publish raw event data to two different RabbitMQ queues.
-3.  The `pancake-relay` service consumes messages from the generic `pool-swaps` queue.
-4.  The relay enriches these messages by fetching token metadata (with Redis caching), filters for pairs involving WBNB, and transforms the data into a standardized `Trade` format.
-5.  The relay then publishes this standardized `Trade` message to the final `trades` queue.
-6.  The `four-meme-producer` also publishes directly to the `trades` queue, as its data is already in the specific format required.
+1.  A single `blocks-indexer` service streams confirmed blocks from BSC.
+    *   Blocks are processed in batches (configurable size and concurrency) with automatic progress tracking and gap backfilling.
+    *   Every block batch is scanned for Four.Meme and Pancake swap events.
+2.  The indexer publishes Four.Meme trades directly to the `trades` queue and generic Pancake swaps to the `pool-swaps` queue.
+3.  (Optional) When started with `-archive`, the indexer also publishes raw block bodies (`archive-blocks`) and log batches (`archive-logs`) so the raw data can be replayed later without re-querying RPC.
+4.  The `pancake-relay` service consumes messages from the generic `pool-swaps` queue.
+5.  The relay enriches these messages by fetching token metadata (with Redis caching), filters for pairs involving WBNB, and transforms the data into a standardized `Trade` format.
+6.  The relay then publishes this standardized `Trade` message to the final `trades` queue.
 
 The final result is a single, clean stream of `Trade` messages in the `trades` queue, ready for consumption.
 
 ## Services
 
-### `four-meme-producer`
--   **Source:** Listens to events from a hardcoded contract address (`0x5c95...`).
--   **Logic:** Transforms the specific event data into the standard `trade.Trade` format.
--   **Output:** Publishes `trade.Trade` messages to the `trades` queue.
-
-### `pancake-producer`
--   **Source:** Listens for generic `Swap` events across all BSC contracts.
--   **Logic:** Parses the `Swap` event and publishes it without much transformation.
--   **Output:** Publishes `trade.Swap` messages to the `pool-swaps` queue.
+### `blocks-indexer`
+-   **Source:** Subscribes to confirmed BSC blocks via WebSocket and periodically backfills any missed heights.
+-   **Logic:**
+    1.  Batches block headers (size and concurrency are configurable with `BLOCKS_INDEXER_BATCH_SIZE` and `BLOCKS_INDEXER_HISTORICAL_CONCURRENCY`).
+    2.  Fetches logs and block bodies for each batch, tracking progress, remaining blocks, and ETA during catch-up.
+    3.  Extracts Four.Meme trades and Pancake swap events.
+    4.  Optionally archives raw blocks (RLP encoded) and log batches to dedicated RabbitMQ queues when started with `-archive`.
+-   **Output:** Publishes `trade.Trade` messages to `trades`, `trade.Swap` messages to `pool-swaps`, and optionally raw data to `archive-*` queues.
 
 ### `pancake-relay`
 -   **Input:** Consumes `trade.Swap` messages from the `pool-swaps` queue.
@@ -61,13 +60,15 @@ The final result is a single, clean stream of `Trade` messages in the `trades` q
 -   **Output:** Republishes historical data to the message queues.
 
 ### Infrastructure
--   **RabbitMQ:** Message broker with two main queues: `pool-swaps` (for raw data) and `trades` (for standardized data). It is configured for persistence.
+-   **RabbitMQ:** Message broker with `pool-swaps` (raw swaps), `trades` (canonical trades), and optional archival queues `archive-blocks` / `archive-logs`. It is configured for persistence.
 -   **Redis:** Used as a cache by the `pancake-relay` to store token metadata for pool addresses.
+-   **MongoDB:** Receives archived payloads through the `archive-collector` service when archiving is enabled.
 
 ## Data Models
 
 -   **`shared/trade/trade.go`**: Defines the canonical `Trade` struct. This is the standard format for all processed trades that end up in the `trades` queue.
 -   **`shared/trade/swap.go`**: Defines the `Swap` struct, which represents a raw swap event from a DEX pool.
+-   Archival payloads are simple JSON wrappers containing block numbers plus RLP-encoded bodies or raw log slices, enabling lossless replay.
 
 ## Configuration
 
@@ -80,3 +81,5 @@ The entire stack can be built and run with a single command:
 ```shell
 docker-compose up --build
 ```
+
+To enable raw-data archiving, start the blocks indexer with the `-archive` flag (Docker Compose will pass it if you override `command` or `entrypoint`).
