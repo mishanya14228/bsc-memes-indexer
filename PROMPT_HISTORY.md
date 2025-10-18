@@ -67,3 +67,15 @@ This document summarizes the development process and key decisions made during t
     - The service was containerized and added to `docker-compose.yml`.
 - **Docker and Localhost:**
     - Discussed how to access services running on the host's `localhost` from within a Docker container using `host.docker.internal`.
+
+## 8. Consolidating Producers into `blocks-indexer`
+
+- Replaced the separate Four.Meme and Pancake producers with a single `blocks-indexer` service that streams confirmed blocks via WebSocket.
+- Added configurable batch size/concurrency, progress logging (remaining blocks, percentage, ETA), and automatic backfill of one-block gaps to avoid missed heights.
+- Publishing now includes optional archival queues (`archive-blocks`, `archive-logs`) populated when the indexer is launched with the `-archive` flag.
+
+## 9. Archival Pipeline
+
+- Introduced the `archive-collector` service, which subscribes to the archive queues and writes each payload into MongoDB collections named after the queue.
+- Blocks are stored as hex-encoded RLP payloads alongside log batches so the system can be replayed without hitting the RPC again.
+- Docker Compose and `.env.example` were updated to wire in the collector and archival configuration.
