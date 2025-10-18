@@ -680,8 +680,7 @@ func main() {
 	go func() {
 		defer wg.Done()
 		if err := indexer.Run(ctx, *startFrom); err != nil && !errors.Is(err, context.Canceled) {
-			log.Printf("[error] indexer exited with error: %v", err)
-			cancel()
+			log.Fatalf("[fatal] indexer exited with error: %v", err)
 		}
 	}()
 
