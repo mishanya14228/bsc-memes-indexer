@@ -104,7 +104,8 @@ func NewIndexer(wssURL, httpURL, rabbitmqURL, redisURL string, archiveEnabled bo
 	}
 
 	args := amqp.Table{
-		"x-dead-letter-exchange": dlxName,
+		"x-dead-letter-exchange":    dlxName,
+		"x-dead-letter-routing-key": queue.PoolSwapsQueue,
 	}
 	if _, err := amqpChannel.QueueDeclare(queue.PoolSwapsQueue, true, false, false, false, args); err != nil {
 		return nil, fmt.Errorf("failed to declare queue %s: %w", queue.PoolSwapsQueue, err)
