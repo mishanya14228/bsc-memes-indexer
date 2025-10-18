@@ -3,6 +3,10 @@ services:
     image: 'mongo:7'
     ports:
       - '27017:27017'
+    deploy:
+      resources:
+        limits:
+          memory: 16G
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_INITDB_ROOT_USERNAME}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_INITDB_ROOT_PASSWORD}
@@ -51,6 +55,7 @@ services:
       dockerfile: Dockerfile
       args:
         APP_NAME: blocks-indexer
+    command: ./server -archive
     env_file:
       - .env
     restart: unless-stopped
