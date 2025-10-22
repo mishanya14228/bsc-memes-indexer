@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -414,6 +415,17 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 		return nil
 	}
 
+	// Debug: log headers before sorting
+	if len(headers) > 1 {
+		var headerNums []string
+		for _, h := range headers {
+			if h.Number != nil {
+				headerNums = append(headerNums, h.Number.String())
+			}
+		}
+		log.Printf("[debug] headers before sort: [%s]", strings.Join(headerNums, ", "))
+	}
+
 	// Sort headers by block number to ensure proper from/to range
 	sort.Slice(headers, func(i, j int) bool {
 		if headers[i].Number == nil || headers[j].Number == nil {
@@ -421,6 +433,17 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 		}
 		return headers[i].Number.Cmp(headers[j].Number) < 0
 	})
+
+	// Debug: log headers after sorting
+	if len(headers) > 1 {
+		var headerNums []string
+		for _, h := range headers {
+			if h.Number != nil {
+				headerNums = append(headerNums, h.Number.String())
+			}
+		}
+		log.Printf("[debug] headers after sort: [%s]", strings.Join(headerNums, ", "))
+	}
 
 	from := headers[0].Number
 	to := headers[len(headers)-1].Number
