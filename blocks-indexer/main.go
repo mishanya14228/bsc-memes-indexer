@@ -460,10 +460,14 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 
 	blocks := make(map[uint64]*types.Block, len(headers))
 	txByHash := make(map[common.Hash]*types.Transaction)
+	var fetchErrors []error
+
 	for _, header := range headers {
 		block, err := i.ethHTTPClient.BlockByNumber(ctx, header.Number)
 		if err != nil {
-			return fmt.Errorf("failed to fetch block %s: %w", header.Number.String(), err)
+			log.Printf("[warn] failed to fetch block %s: %v, will skip logs for this block", header.Number.String(), err)
+			fetchErrors = append(fetchErrors, err)
+			continue // Don't fail the entire batch, just skip this block
 		}
 		blocks[block.NumberU64()] = block
 		if i.archiveEnabled {
@@ -476,13 +480,20 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 		}
 	}
 
+	// If we failed to fetch any blocks, log it but continue processing available blocks
+	if len(fetchErrors) > 0 {
+		log.Printf("[warn] failed to fetch %d out of %d blocks in batch, processing available blocks only", len(fetchErrors), len(headers))
+	}
+
 	fourMemeAddress := common.HexToAddress(contracts.FourMemeContractAddress)
 	swapTopic := pancake.SwapEventTopic()
 
+	skippedLogs := 0
 	for _, vLog := range logs {
 		block := blocks[vLog.BlockNumber]
 		if block == nil {
-			log.Printf("[warn] missing block data for number %d", vLog.BlockNumber)
+			log.Printf("[warn] missing block data for number %d (log tx: %s), skipping log processing", vLog.BlockNumber, vLog.TxHash.Hex())
+			skippedLogs++
 			continue
 		}
 		timestamp := block.Time()
@@ -528,7 +539,11 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 		i.persistCheckpoint(ctx)
 	}
 
-	log.Printf("[info] processed block batch %d-%d (%d logs)", headers[0].Number.Uint64(), lastNumber, len(logs))
+	if skippedLogs > 0 {
+		log.Printf("[info] processed block batch %d-%d (%d logs, %d skipped due to missing blocks)", headers[0].Number.Uint64(), lastNumber, len(logs), skippedLogs)
+	} else {
+		log.Printf("[info] processed block batch %d-%d (%d logs)", headers[0].Number.Uint64(), lastNumber, len(logs))
+	}
 	return nil
 }
 
