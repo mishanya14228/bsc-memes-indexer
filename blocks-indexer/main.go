@@ -448,6 +448,8 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 	from := headers[0].Number
 	to := headers[len(headers)-1].Number
 
+	log.Printf("[debug] processBatch: from=%s to=%s headers_count=%d", from.String(), to.String(), len(headers))
+
 	// Additional safety check to prevent invalid ranges
 	if from != nil && to != nil && from.Cmp(to) > 0 {
 		return fmt.Errorf("invalid block range: from (%s) > to (%s), headers count: %d", from.String(), to.String(), len(headers))
@@ -467,6 +469,8 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 	if err != nil {
 		return fmt.Errorf("failed to filter logs for range %s-%s: %w", from.String(), to.String(), err)
 	}
+
+	log.Printf("[debug] FilterLogs returned %d logs for range %s-%s", len(logs), from.String(), to.String())
 	if i.archiveEnabled {
 		fromNumber := uint64(0)
 		toNumber := uint64(0)
