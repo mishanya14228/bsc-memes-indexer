@@ -490,26 +490,39 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 		var err error
 		blockNum := header.Number.String()
 
+		log.Printf("[debug] attempting to fetch block %s", blockNum)
+
 		// Retry logic for blocks that might be temporarily unavailable
 		maxRetries := 3
 		for attempt := 0; attempt < maxRetries; attempt++ {
+			log.Printf("[debug] block %s fetch attempt %d/%d", blockNum, attempt+1, maxRetries)
 			block, err = i.ethHTTPClient.BlockByNumber(ctx, header.Number)
-			if err == nil {
-				break // Success
+			if err == nil && block != nil {
+				break // Success - block found
 			}
 
 			if attempt < maxRetries-1 {
 				retryDelay := time.Duration(attempt+1) * 500 * time.Millisecond // 500ms, 1s, 1.5s
-				log.Printf("[debug] block %s not available (attempt %d/%d), retrying in %v: %v",
-					blockNum, attempt+1, maxRetries, retryDelay, err)
+				if err != nil {
+					log.Printf("[debug] block %s error (attempt %d/%d), retrying in %v: %v",
+						blockNum, attempt+1, maxRetries, retryDelay, err)
+				} else {
+					log.Printf("[debug] block %s returned null (attempt %d/%d), retrying in %v",
+						blockNum, attempt+1, maxRetries, retryDelay)
+				}
 				time.Sleep(retryDelay)
 			}
 		}
 
-		if err != nil {
-			log.Printf("[warn] failed to fetch block %s after %d attempts: %v, will skip logs for this block",
-				blockNum, maxRetries, err)
-			fetchErrors = append(fetchErrors, err)
+		if err != nil || block == nil {
+			if err != nil {
+				log.Printf("[warn] failed to fetch block %s after %d attempts: %v, will skip logs for this block",
+					blockNum, maxRetries, err)
+			} else {
+				log.Printf("[warn] block %s returned null after %d attempts, will skip logs for this block",
+					blockNum, maxRetries)
+			}
+			fetchErrors = append(fetchErrors, fmt.Errorf("block not available"))
 			continue // Don't fail the entire batch, just skip this block
 		}
 		blocks[block.NumberU64()] = block
