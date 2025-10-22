@@ -382,6 +382,14 @@ func (i *Indexer) runLive(ctx context.Context) error {
 
 			buffer = append(buffer, header)
 			for len(buffer) >= int(i.blockBatchSize) {
+				// Sort buffer to ensure proper ordering before creating batch
+				sort.Slice(buffer, func(i, j int) bool {
+					if buffer[i].Number == nil || buffer[j].Number == nil {
+						return false
+					}
+					return buffer[i].Number.Cmp(buffer[j].Number) < 0
+				})
+
 				batch := make([]*types.Header, int(i.blockBatchSize))
 				copy(batch, buffer[:int(i.blockBatchSize)])
 
@@ -416,6 +424,11 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 
 	from := headers[0].Number
 	to := headers[len(headers)-1].Number
+
+	// Additional safety check to prevent invalid ranges
+	if from != nil && to != nil && from.Cmp(to) > 0 {
+		return fmt.Errorf("invalid block range: from (%s) > to (%s), headers count: %d", from.String(), to.String(), len(headers))
+	}
 
 	query := ethereum.FilterQuery{
 		FromBlock: from,
