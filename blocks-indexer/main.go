@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -404,6 +405,14 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 	if len(headers) == 0 {
 		return nil
 	}
+
+	// Sort headers by block number to ensure proper from/to range
+	sort.Slice(headers, func(i, j int) bool {
+		if headers[i].Number == nil || headers[j].Number == nil {
+			return false
+		}
+		return headers[i].Number.Cmp(headers[j].Number) < 0
+	})
 
 	from := headers[0].Number
 	to := headers[len(headers)-1].Number
