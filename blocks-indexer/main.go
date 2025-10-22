@@ -486,9 +486,29 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 	var fetchErrors []error
 
 	for _, header := range headers {
-		block, err := i.ethHTTPClient.BlockByNumber(ctx, header.Number)
+		var block *types.Block
+		var err error
+		blockNum := header.Number.String()
+
+		// Retry logic for blocks that might be temporarily unavailable
+		maxRetries := 3
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			block, err = i.ethHTTPClient.BlockByNumber(ctx, header.Number)
+			if err == nil {
+				break // Success
+			}
+
+			if attempt < maxRetries-1 {
+				retryDelay := time.Duration(attempt+1) * 500 * time.Millisecond // 500ms, 1s, 1.5s
+				log.Printf("[debug] block %s not available (attempt %d/%d), retrying in %v: %v",
+					blockNum, attempt+1, maxRetries, retryDelay, err)
+				time.Sleep(retryDelay)
+			}
+		}
+
 		if err != nil {
-			log.Printf("[warn] failed to fetch block %s: %v, will skip logs for this block", header.Number.String(), err)
+			log.Printf("[warn] failed to fetch block %s after %d attempts: %v, will skip logs for this block",
+				blockNum, maxRetries, err)
 			fetchErrors = append(fetchErrors, err)
 			continue // Don't fail the entire batch, just skip this block
 		}
@@ -505,7 +525,11 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 
 	// If we failed to fetch any blocks, log it but continue processing available blocks
 	if len(fetchErrors) > 0 {
-		log.Printf("[warn] failed to fetch %d out of %d blocks in batch, processing available blocks only", len(fetchErrors), len(headers))
+		successfulBlocks := len(headers) - len(fetchErrors)
+		log.Printf("[warn] failed to fetch %d out of %d blocks in batch (%d successful), processing available blocks only",
+			len(fetchErrors), len(headers), successfulBlocks)
+	} else {
+		log.Printf("[debug] successfully fetched all %d blocks in batch", len(headers))
 	}
 
 	fourMemeAddress := common.HexToAddress(contracts.FourMemeContractAddress)
