@@ -549,6 +549,13 @@ func (i *Indexer) processBatch(ctx context.Context, headers []*types.Header) err
 		log.Printf("[debug] successfully fetched all %d blocks in batch", len(headers))
 	}
 
+	// Debug: log available blocks in map
+	var availableBlocks []string
+	for blockNum := range blocks {
+		availableBlocks = append(availableBlocks, fmt.Sprintf("%d", blockNum))
+	}
+	log.Printf("[debug] blocks in map: [%s] (total: %d)", strings.Join(availableBlocks, ", "), len(blocks))
+
 	fourMemeAddress := common.HexToAddress(contracts.FourMemeContractAddress)
 	swapTopic := pancake.SwapEventTopic()
 
