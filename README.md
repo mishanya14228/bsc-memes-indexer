@@ -1,5 +1,5 @@
 # Project info
-скорми боту [PROJECT_SUMMARY.md](https://github.com/mishanya14228/bsc-memes-indexer/blob/main/PROJECT_SUMMARY.md) и [PROMPT_HISTORY.md](https://github.com/mishanya14228/bsc-memes-indexer/blob/main/PROMPT_HISTORY.md)
+[PROJECT_SUMMARY.md](https://github.com/mishanya14228/bsc-memes-indexer/blob/main/PROJECT_SUMMARY.md) и [PROMPT_HISTORY.md](https://github.com/mishanya14228/bsc-memes-indexer/blob/main/PROMPT_HISTORY.md)
 
 # Blocks Indexer
 - `blocks-indexer` is now the primary producer for both Four.Meme trades and Pancake swap events.
